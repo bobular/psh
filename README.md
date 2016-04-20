@@ -9,7 +9,7 @@ psh (c) 1998 Marcel Turcotte and Bob MacCallum
 
 Simple perl shell, uses AUTOLOAD to make system calls for commands which
 are not defined.  Multiple line entry is accomplished by adding a
-tailing \.  or by leaving an unbalanced (, { or [ (or <<EOF).
+trailing backslash, or by leaving an unbalanced (, { or [ (or <<EOF).
 Force execution (the balancing check isn't very clever) by terminating
 a line with ;; (two semicolons)
 
@@ -21,8 +21,6 @@ system() or backticks
 
 You can put your own functions and other startup code in your .pshrc
 
-
-
 To use unix `ls' (for example) without having to write ls() put prototypes
 in your .pshrc like this
   sub ls;
@@ -31,19 +29,14 @@ in your .pshrc like this
 or see http://perldoc.perl.org/5.8.8/Shell.html
 
 Aliases are done like this:
+
   sub ll { ls('-l', @_) };
 
 ##changing the behaviour in .pshrc
 
-the $prompt string is eval'ed to make the prompt: for example
-$prompt = '"psh<".($readline_attribs->{history_base}
-                   +$readline_attribs->{history_length}).">% "';
+the $prompt variable is evalled to make the prompt
 
-set this variable like this:
-$psh_keywords_h = '/usr/local/src/perl5.004_01/keywords.h';
-to get all the perl keywords completed (grep foreach etc)
-
-and $psh_history_size = 50
+adjust $psh_history_size = 50
 to change the size of the history between invocations (default 100)
 
 ##Miscellaneous
