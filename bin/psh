@@ -1,0 +1,380 @@
+#/usr/bin/env perl
+
+use warnings;
+# this was written in the days before "use strict"!
+
+use Term::ReadLine;
+
+psh_init();
+psh_run();
+
+sub AUTOLOAD 
+{
+  my $program = $AUTOLOAD;
+  $program =~ s/.*:://;
+  $program =~ s/^_//;    # leading underscore
+  $SIG{TSTP} = 'IGNORE'; # ctrl-z doesn't work for system calls
+  return system($program, @_);
+}
+
+sub psh_run
+{
+  my $psh_balanced = 0;
+
+  $| = 1;
+  $prompt = '"psh> "' if (not defined $prompt);
+
+  $lr = undef;
+  $psh_current_line = '';
+
+  $SIG{INT} = 'IGNORE';
+  $SIG{TSTP} = 'IGNORE';
+  if ($autologout) {
+    $SIG{ALRM} = sub { die "*** autologout ***\n"; };
+    alarm $autologout;
+  }
+  while (defined ($_ = $readline_terminal->readline(eval($prompt).'  'x$psh_balanced))) 
+  {
+    alarm 0 if ($autologout);
+    $psh_current_line .= "$_\n";
+    ($psh_current_line, $psh_balanced) = psh_eval_line($psh_current_line);
+
+    if ($autologout) {
+      $SIG{ALRM} = sub { die "*** autologout ***\n"; };
+      alarm $autologout;
+    }
+  }
+}
+
+sub psh_init
+{
+  $SIG{__WARN__} = sub {};
+  $readline_terminal = new Term::ReadLine 'psh';
+  $SIG{__WARN__} = 'DEFAULT';
+
+  $readline_features = $readline_terminal->Features;
+
+  if (exists $readline_features->{attribs})
+  {
+    $readline_attribs = $readline_terminal->Attribs;
+    
+    $readline_attribs->{attempted_completion_function} = \&psh_complete;
+    $readline_attribs->{special_prefixes} = '$@%';
+    $readline_attribs->{completer_word_break_characters} =~ s/\{//g;
+
+    # added for $object->method() completion
+    $readline_attribs->{completer_word_break_characters} =~ s/[<>]//g;
+
+    $readline_attribs->{completion_append_character} = '';
+
+    $readline_terminal->parse_and_bind("Control-g: kill-whole-line");
+  }
+
+  if (exists $readline_features->{readHistory} &&
+      exists $readline_features->{stiflehistory})
+  {
+    $psh_history_size = 100 unless ($psh_history_size);
+    $readline_terminal->stifle_history($psh_history_size);
+    if (-e "$ENV{HOME}/.psh-history") {
+      $readline_terminal->ReadHistory("$ENV{HOME}/.psh-history");
+    }
+  }
+
+  if (-e "$ENV{HOME}/.pshrc") {
+    do "$ENV{HOME}/.pshrc";
+  } elsif ($ENV{PSHRC} && -e $ENV{PSHRC}) {
+    do $ENV{PSHRC};
+  }
+
+  if (defined $psh_keywords_h && open(TOKE, $psh_keywords_h))
+  {
+    while (<TOKE>) {
+	push @keywords, $1 if (/^#define KEY_(\w+)/);
+    }
+    close(TOKE);
+  }
+}
+
+sub END
+{
+  if (exists $readline_features->{writeHistory})
+  { 
+    $readline_terminal->WriteHistory("$ENV{HOME}/.psh-history");
+  }
+}
+
+sub psh_balanced
+{
+    # check for balanced brackets etc
+    my ($l) = @_;
+    # remove all escaped and quoted brackets
+    $l =~ s/\\[(){}\[\]]//g;
+    $l =~ s/".*?"|'.*?'//g;
+    # remove all (.+) [.+] etc from inside out...
+    while ($l =~ s/ \([^()]*\) | \[[^\[\]]*\] | \{[^{}]*\} //sx) { }
+    # how many are left?		
+    my @unmatched = $l =~ /([({[])/g;
+
+    # look for heretext (only one level at present)
+    my ($h) = @_;			 
+    if (@unmatched == 0 && $h =~ /<<\s*(\S.*)$/m) {  
+      my $start = quotemeta($1);
+      my $end = $1;
+      $end =~ s/^["'`]//;  $end =~ s/["'`;\s]+$//;
+      $end = quotemeta($end);
+      return $h !~ /$start.+$end\n/s; 
+    }
+    return scalar(@unmatched);
+}
+
+sub psh_eval_line
+{
+    ($_) = @_;
+
+    # does it end with a slash?
+    return ($_, 0) if (s/\\\s*$//);
+
+    # if not ending with a ;; is it balanced?
+    my $bal = psh_balanced($_);
+    return ($_, $bal) if ($bal > 0 && !/;;\s*$/);
+
+    $SIG{INT} = sub { die "killed\n"; };
+    $SIG{TSTP} = \&psh_background unless (/system|sleep/);
+                                         # ctrl-z doesn't work for system calls
+    # now eval it!!
+    $lr = eval;
+
+    $SIG{INT} = 'IGNORE';
+    $SIG{TSTP} = 'IGNORE';
+
+    print $@;
+    print "$lr\n" if (defined $lr && defined $echolr && $echolr);
+
+    return ('', 0);
+}
+
+sub psh_desc_pkg_tree {
+  my $package = shift;
+  my @result = ();
+  foreach $subpackage (eval '@'.$package.'ISA') {
+    push @result, psh_desc_pkg_tree($subpackage.'::');
+  }
+  return @result, keys %$package;
+}
+
+sub psh_complete
+{
+  my ($start, $text) = @_;
+  my $qmstart = quotemeta($start);
+  my @completions = ();
+
+  # just an 'ls' not all the perl stuff
+  return () if ($start eq '');
+
+  # inferior history expansion because it can't do '!$xyz'
+  # or '!sub abc' (with whitespace) as readline gets there first on these
+  # occasions, but then again maybe you wouldn't want it to...
+  if ($start =~ /^!(.+)/) {
+    my ($result, $expansion) = $readline_terminal->history_expand($start);
+    return ($expansion) if ($result);
+  }
+
+
+  # simple hash key completion
+  if ($start =~ /^\$((?:\w+(?:::)?)+)\{(.*)$/)
+  { 
+    my ($hashname, $keystart) = ($1,quotemeta($2));
+    my @keys = grep /^$keystart/, keys %$hashname;
+    $keys[0] =~ s/^(\d+\D.*|.*\W.*)$/'$1'/ if (@keys == 1);
+    push @completions, map "\$$hashname\{$_\}", @keys; 
+  }
+      
+  my $package = 'main::';
+  my $ppfx = '';
+
+
+  my @objectkeys = ();
+
+  # and $objects-> 
+  if ($start =~ /^ \$ (\w+) /x) {
+#print STDERR "++";
+    my $grab = $1;  
+    my $refresult = ref $$grab;
+    if ($refresult && $refresult !~ /^(REF|SCALAR|ARRAY|HASH|CODE|GLOB)$/) {
+      @objectkeys = eval "keys %{\$$grab}";
+      $package = $refresult;
+      $package .= '::';
+      ($ppfx = $start) =~ s/->?[\w{}]*$//;
+      $ppfx .= '->';
+#      print STDERR "==";
+    }
+#print STDERR "--";
+  }
+
+  # sort out Packages:: if not found an object
+  if (!$ppfx && $start =~ /((\w+::)+)/) {
+#print STDERR "**";
+    $package = $1;
+    $ppfx = $package;
+  }
+
+  push @completions, grep /^$qmstart/ && !/^\$\_\</, 
+                     map psh_namefix($_), 
+                     map "$ppfx$_", psh_desc_pkg_tree($package);
+
+  push @completions, grep /^$qmstart/, map "$ppfx\{$_\}", @objectkeys;
+  push @completions, grep /^$qmstart/, @keywords;
+
+  push @completions, glob "$qmstart*" if (@completions);
+
+  # package names from @INC
+  if ($text =~ /\buse\s+$qmstart$/) { 
+    # reset completions
+    @completions = grep /^$qmstart/, 
+                   map { /(\w+).pm/; $1 } map glob("$_/*.pm"), (@INC, '.');
+  }
+
+
+  my %got;
+  @completions = grep { !$got{$_} && ($got{$_}=1) } @completions;
+
+  if (@completions==1)
+  {
+    # if it's PackageX::
+    if ($completions[0] =~ /(\W*?)((\w+::)+)$/) {
+      my ($symbol, $package) = (quotemeta($1), $2);
+      $symbol = $package unless ($symbol);
+      return ($completions[0], 
+	      grep /^$symbol/,
+	      map psh_namefix($_), 
+	      map "$package$_", 
+	      keys %$package);
+    }
+
+    # if it's an $object 
+    if ($completions[0] =~ /^\$ (\w+) $/x) {
+#print STDERR "---hello---\n";
+      my $objname = $1;
+      my $refresult = ref $$objname;
+      if ($refresult && $refresult !~ /^(REF|SCALAR|ARRAY|HASH|CODE|GLOB)$/) {
+	# we've got the package of the object
+	$refresult .= '::';
+	my @objectkeys = eval "keys %{$completions[0]}";
+	return ($completions[0], 
+		$completions[0], 
+		(map "$completions[0]\-\>$_", psh_desc_pkg_tree($refresult)),
+	        (map "$completions[0]\-\>\{$_\}", @objectkeys));
+      }
+    }
+
+    # if the sole completion starts with a $variable containing a valid directory...
+    if ($completions[0] =~ /^\$\w+$/)
+    {
+      my $evalled = eval "$completions[0]";
+      return ("$evalled/") if ($evalled && 
+			       $evalled !~ /\s/ &&
+			       -d $evalled);
+    }
+
+    # if the sole completion is a hash index return the keys
+    if ($completions[0] =~ /\$((?:\w+(?:::)?)+)\{$/)
+    {
+      my $hashname = $1;
+      return @completions, map "\$$hashname\{$_\}", keys %{$hashname};
+    }
+  }
+
+
+
+  # complete common stem of completions or ''
+  if (@completions>1)
+  {
+    my $stemlength = 0;
+    my %stems;
+    my $common = '';
+    while (keys(%stems)<=1)
+    {
+      $stemlength++; %stems = ();
+      grep { $stems{substr($_, 0, $stemlength)}=1 } @completions;
+    }
+    $common = substr($completions[0], 0, $stemlength-1);
+    unshift @completions, $common;
+  }
+
+  return @completions;
+}
+
+sub psh_namefix
+{
+  my ($key) = @_;
+  my @result = ();
+  return ($key) if ($key =~ /->\w+$/); # have to do this otherwise
+                                       # all the names end up in the main:: scope
+  push @result, "\$$key" if (defined $$key);
+  push @result, "\$$key\[" if (@$key);
+  push @result, "\$$key\{" if (defined $key && $key !~ /::$/);
+  push @result, "\@$key" if (@$key);
+  push @result, "\%$key" if (defined $key);
+  push @result, $key if (defined &$key);
+  if ($key =~ /::$/ && $key !~ /->/) {
+    push @result, $key, "\$$key", "\@$key", "\%$key";
+  }
+  return @result;
+}
+
+sub psh_background # ctrl-z backgrounding
+{
+  my $pid;
+
+  if ($pid = fork())
+  {
+    #parent 
+    push @psh_jobs, $pid;
+    die "backgrounded $pid\n";
+  }  
+  else
+  {
+    #child
+  }
+}
+
+sub bg (&)  # backgrounding on purpose (like 'emacs &' in csh)
+{ 
+  my ($code) = @_;
+  my $pid; 
+  if ($pid=fork())
+  {
+    push @psh_jobs, $pid;
+    print "backgrounded $pid\n";
+  }
+  else
+  {
+    $SIG{INT} = 'IGNORE';
+    &$code; exit 
+  }
+}
+
+sub listjobs
+{
+  my $lastnum = 0;
+  while (@psh_jobs != $lastnum)
+  {
+    $SIG{CHLD} = sub { wait };
+    $lastnum = @psh_jobs;
+    @psh_jobs = grep { kill 0, $_ } @psh_jobs;
+  }
+  print "backgrounded jobs: @psh_jobs\n" if (@psh_jobs);
+  $SIG{CHLD} = 'DEFAULT';
+}
+
+sub help 
+{ 
+  open(ME, $0) || die;
+  my $pager = 'more';
+  $pager = $ENV{PAGER} if (exists $ENV{PAGER});
+  open(PAGER, "|$pager") || die "psh help can't pipe to pager $pager\n";;
+  print PAGER "*** press `q' to quit help `h' for help with pager ***\n\n";
+  while (<ME>) { print PAGER $_ if (s/^#_ ?//); }
+  close(ME);
+  close(PAGER);
+}
