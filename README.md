@@ -3,6 +3,8 @@ Perl shell from the 90s
 
 psh (c) 1998 Marcel Turcotte and Bob MacCallum 
 
+Would be very happy for someone to drag it into the 21st century (but it still works fine for me).
+
 ##Description
 
 (See also https://gnp.github.io/psh/)
