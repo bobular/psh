@@ -1,0 +1,55 @@
+#
+# example .pshrc for Perl shell
+#
+
+use POSIX qw|uname|;
+
+# use PDC module command
+sub module { eval `$ENV{MODULESHOME}/bin/modulecmd perl @_`; }
+
+# I don't remember this feature!
+$autologout = 0;
+
+# set the prompt
+if (exists $readline_features->{autohistory})
+{
+  my ($blah, $host) = uname();
+  $prompt = '"|'.$host.'|".($readline_attribs->{history_base}+$readline_attribs->{history_length})."| "';
+} else {
+  $prompt = '"psh> "';
+}
+
+# quicker to type than $ENV{HOME}
+$home = $ENV{HOME};
+
+use Config;
+$psh_keywords_h = "$Config{archlib}/CORE/keywords.h";
+
+# a replacement for ctrl-z backgrounding
+sub z { kill SIGSTOP, $$ }
+
+# some system commands you can use without parentheses:
+# see also http://perldoc.perl.org/5.8.8/Shell.html
+sub ls { _ls('-F', @_) };
+sub ll { _ls('-l', @_) };
+sub top;
+sub ps {
+  my (@args) = @_ || ('-u', $ENV{USER});
+  my @res = split /\n/, `ps @args`;
+  return @res if (wantarray());
+  print join("\n", @res), "\n";
+}
+sub emacs;
+sub xlock;
+sub less;
+sub cat;
+sub man;
+sub perldoc;
+
+
+# if you want 'cd' to change Perl's directory:
+use Cwd;           # more portable
+sub pwd { pr cwd } # -------------
+sub cd { chdir(shift(@_) || $ENV{HOME}) ; pwd };
+
+
