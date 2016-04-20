@@ -55,7 +55,9 @@ add your own changes using .inputrc or in your .pshrc using
 some `built-in' variables that you can use
 
 $lr is the last result
+
 to echo $lr after each command set
+
 $echolr = 1 
 
 ##Job control (backgrounding)
